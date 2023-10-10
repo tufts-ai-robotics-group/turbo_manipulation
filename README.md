@@ -12,7 +12,8 @@ ROS package for UR5 manipulation at MuLIP Lab, Tufts.
 
 ```
 cd <location_of_your_workspace>/src
-./install.sh
+git clone https://github.com/tufts-ai-robotics-group/turbo_manipulation.git
+./turbo_manipulation/install.sh
 ```
 
 ## Intel RealSense D455 Camera
