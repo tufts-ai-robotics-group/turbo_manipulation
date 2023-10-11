@@ -31,5 +31,6 @@ git clone https://github.com/tufts-ai-robotics-group/turbo_manipulation.git
 ### pick and place using GPD
 ```
 roslaunch gpd_ros ur5.launch
+rosrun turbo_robot_vision filter_points
 rosrun turbo_manipulation gpd_pick_and_place.py
 ```
