@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # Gyan Tatiya
-
+import os
 import time
 import math
 import rospy
@@ -17,6 +17,10 @@ import math
 import numpy as np
 from geometry_msgs.msg import PoseStamped
 from robotiq_85_msgs.msg import GripperCmd
+
+from std_msgs.msg import Header
+from sensor_msgs.msg import PointCloud2
+from turbo_robot_vision.srv import *
 
 
 def quaternion_to_matrix(quaternion):
@@ -86,6 +90,7 @@ class GPDPickAndPlace:
         #     queue_size=100,
         # )
         self.pub_coordinates = rospy.Publisher("grasp_pose", PoseStamped, queue_size=1000)
+        self.filtered_pointcloud_pub = rospy.Publisher("filtered_pointcloud", PointCloud2, queue_size=10)
 
         self.arm_group = moveit_commander.MoveGroupCommander("right_manipulator")  # Creating moveit client to control arm
         self.gripper_pub = rospy.Publisher('/gripper/cmd', GripperCmd, queue_size=1)
@@ -98,15 +103,17 @@ class GPDPickAndPlace:
         # self.initialise_robot()
         self.open_gripper()
 
+        self.proxy = rospy.ServiceProxy('/turbo_object_detector/detect', TabletopPerception)
         # Wait for grasps to arrive.
-        # rate = rospy.Rate(1)
+        # rate = rospy.Rate(1) 
 
         while not rospy.is_shutdown():
-            # rate.sleep()
 
             self.grasp_pose_done = False
             self.grasp_info_done = False
 
+            self.detect_object()
+            
             x = 0
             while self.grasp_pose_done == False:
                 time.sleep(0.1)
@@ -131,7 +138,24 @@ class GPDPickAndPlace:
                         break
                     # x = x + 1
                 # rospy.loginfo("Success: " + str(success_array))
+                time.sleep(10)
     
+    def detect_object(self):
+        print("Waiting for service ... ")
+        time.sleep(5.0)
+        print("Delay Ends ... ")
+
+        # os.system('rosservice call /turbo_object_detector/detect')        
+        try:
+            rospy.wait_for_service('/turbo_object_detector/detect', timeout=rospy.Duration(5.0))
+        except rospy.ServiceException as e:
+            print("Service call failed: %s"%e)
+
+        resp1 = self.proxy()
+        print("Objects Found : ", len(resp1.cloud_clusters))
+        
+        self.filtered_pointcloud_pub.publish(resp1.cloud_clusters[0])
+
     def callback_coordinates(self, msg):
         # Stores grasp coordinate information from GPD
         self.grasp_pose_array = []
@@ -145,12 +169,13 @@ class GPDPickAndPlace:
                           marker.pose.orientation.z, marker.pose.orientation.w)
 
             pose = PoseStamped()
+            pose.header.frame_id = self.world_tf
             pose.pose.orientation = Quaternion(*quaternion)
             pose.pose.position = marker.pose.position
             
             i = i + 1
 
-            pose = self.perform_transformation(pose)
+            # pose = self.perform_transformation(pose)
             pose = move_pose_forward(pose, 0.03)
             self.grasp_pose_array.append(pose)
 
@@ -187,13 +212,14 @@ class GPDPickAndPlace:
         angle = euler_from_quaternion([pose.pose.orientation.x, pose.pose.orientation.y,
                                        pose.pose.orientation.z, pose.pose.orientation.w])
         roll, pitch, yaw = math.degrees(angle[0]), math.degrees(angle[1]), math.degrees(angle[2])
-        # print('pitch: ', angle[1], pitch)
+        print('pitch: ', angle[1], pitch)
 
         success = False
-        if (self.table_corners_x[0] + 0.05 < pose.pose.position.x < self.table_corners_x[1] - 0.05) \
-            and (self.table_corners_y[0] + 0.05 < pose.pose.position.y < self.table_corners_y[1] - 0.05) \
-            and (self.table_height_z < pose.pose.position.z < self.table_height_z + 0.1) \
-            and ((45 < pitch < 135) or (-315 < pitch < -225)):
+        # if (self.table_corners_x[0] + 0.05 < pose.pose.position.x < self.table_corners_x[1] - 0.05) \
+        #     and (self.table_corners_y[0] + 0.05 < pose.pose.position.y < self.table_corners_y[1] - 0.05) \
+        #     and (self.table_height_z < pose.pose.position.z < self.table_height_z + 0.1) \
+        #     and ((45 < pitch < 135) or (-315 < pitch < -225)):
+        if ((45 < pitch < 135) or (-315 < pitch < -225)):
             
             # print('pitch: ', angle[1], pitch)
 
@@ -273,14 +299,11 @@ class GPDPickAndPlace:
 
         print("robot_trajectory: ", len(robot_trajectory.joint_trajectory.points))
 
-        if len(robot_trajectory.joint_trajectory.points) == 0:
-            # It is always good to clear your targets after planning with poses
-            self.arm_group.clear_pose_targets()
-
         success = False
         if 0 < len(robot_trajectory.joint_trajectory.points) <= 3:
             success = True
         else:
+            # It is always good to clear your targets after planning with poses
             self.arm_group.clear_pose_targets()
         
         print('success: ', success)

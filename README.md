@@ -6,7 +6,6 @@ ROS package for UR5 manipulation at MuLIP Lab, Tufts.
 
 1. Ubuntu 18.04
 2. ROS Melodic
-3. setup TURBO: `git clone https://github.com/samaypashine/TURBO.git`
 
 ## Installation
 
