@@ -1,25 +1,25 @@
 #!/usr/bin/env python
 
 # Gyan Tatiya
+
 import os
 import time
 import math
+import numpy as np
+
 import rospy
 from gpd_ros.msg import GraspConfigList
 from visualization_msgs.msg import MarkerArray
-from geometry_msgs.msg import TransformStamped, PoseStamped, Pose, Quaternion
+from geometry_msgs.msg import PoseStamped, WrenchStamped, TransformStamped, PoseStamped, Pose, Quaternion
+from robotiq_85_msgs.msg import GripperCmd
+from std_msgs.msg import Header
+from sensor_msgs.msg import PointCloud2, JointState
+
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 import tf2_ros
 import tf2_geometry_msgs
 import moveit_commander
 
-import math
-import numpy as np
-from geometry_msgs.msg import PoseStamped
-from robotiq_85_msgs.msg import GripperCmd
-
-from std_msgs.msg import Header
-from sensor_msgs.msg import PointCloud2
 from turbo_robot_vision.srv import *
 
 
@@ -68,6 +68,8 @@ class GPDPickAndPlace:
 
         self.world_tf = "world"
         self.camera_tf = "camera_depth_optical_frame"
+        self.gripper_topic = '/gripper/joint_states'
+        self.wrench_topic = '/right/wrench'
 
         # Table corner poses:
         self.table_corners_x = [0.038783, 0.87016]
@@ -98,14 +100,14 @@ class GPDPickAndPlace:
 
         # Performs transformation from one link to other
         self.buffer = tf2_ros.Buffer()
-        tf2_ros.TransformListener(self.buffer)  # Listens to tf to get transformaton information necessary
+        tf2_ros.TransformListener(self.buffer)  # Listens to tf to get transformation information necessary
         rospy.sleep(2)  # Provides time for buffer to collect data
 
         # self.initialise_robot()
         self.open_gripper()
 
         # Wait for grasps to arrive.
-        # rate = rospy.Rate(1) 
+        # rate = rospy.Rate(1)
 
         while not rospy.is_shutdown():
 
@@ -120,24 +122,51 @@ class GPDPickAndPlace:
                 x = x + 1
                 if x > 1200:  # Adds a 120 second time out for the while loop
                     print(
-                        "Error: Was not able to properly recieve and process information"
+                        "Error: Was not able to properly receive and process information"
                     )
                     break
 
-            
             if self.grasp_pose_done:
-                # x = 0
-                success_array = (
-                    []
-                )  # Stores whether grasp suceeds in inverse kinematics test or not
-                for grasp_pose in self.grasp_pose_array:
-                    success = self.IK_verification(grasp_pose)
-                    success_array.append(success)
-                    if success:
-                        # rospy.signal_shutdown("Exiting ROS node")
-                        break
-                    # x = x + 1
-                # rospy.loginfo("Success: " + str(success_array))
+                pose = self.filter_grasp_pose()
+                if pose:
+                    print('MOVING to pose: ', pose)
+
+                    # raw_input('Approach ...')
+                    pose.pose.position.z += 0.10                    
+                    self.open_gripper()
+                    self.move_safely(pose)
+
+                    # raw_input('Grasp ...')
+                    pose.pose.position.z -= 0.10
+                    self.move_safely(pose)
+                    self.close_gripper()
+                    gripper_pose = self.get_gripper_position()
+                    print('gripper_pose: ', gripper_pose)
+
+                    # raw_input('Lift ...')
+                    pose.pose.position.z += 0.10
+                    self.move_safely(pose)
+
+                    # Make sure grasp was successful
+                    if not (self.check_grasp_gripper_pose() and self.check_grasp_gripper_pose_difference(gripper_pose)):
+                        print('Retrying from top ...')
+                        continue
+
+                    # raw_input('Move to a random location ...')
+                    success = False
+                    while not success:
+                        pose.pose.position.x = np.random.uniform(self.table_corners_x[0] + 0.15, self.table_corners_x[1] - 0.15)
+                        pose.pose.position.y = np.random.uniform(self.table_corners_y[0] + 0.1, self.table_corners_y[1] - 0.1)
+                        success = self.check_plan(pose, num_points=10)
+                    self.move_safely(pose)
+
+                    # raw_input('Place ...')
+                    pose.pose.position.z -= 0.10
+                    self.move_safely(pose)
+                    self.open_gripper()
+                    pose.pose.position.z += 0.20
+                    self.move_safely(pose)
+
                 # time.sleep(10)
     
     def detect_object(self):
@@ -203,93 +232,56 @@ class GPDPickAndPlace:
 
         print('self.grasp_info_array: ', len(self.grasp_info_array))
     
-    def IK_verification(self, pose):
+    def filter_grasp_pose(self):
         '''
         TODO:
-        - select pose that is close to the currecnt arm pose        
+        - select pose that is close to the current arm pose        
         '''
 
         down_orientation = quaternion_from_euler(0, 3.1415 / 2, 0)
-        # pose.pose.orientation.x = down_orientation[0]
-        # pose.pose.orientation.y = down_orientation[1]
-        # pose.pose.orientation.z = down_orientation[2]
-        # pose.pose.orientation.w = down_orientation[3]
 
-        angle = euler_from_quaternion([pose.pose.orientation.x, pose.pose.orientation.y,
-                                       pose.pose.orientation.z, pose.pose.orientation.w])
-        roll, pitch, yaw = math.degrees(angle[0]), math.degrees(angle[1]), math.degrees(angle[2])
-        # print('pitch: ', angle[1], pitch)
+        filtered_grasp_poses = []
+        for pose in self.grasp_pose_array:
 
-        success = False
-        # if (self.table_corners_x[0] + 0.05 < pose.pose.position.x < self.table_corners_x[1] - 0.05) \
-        #     and (self.table_corners_y[0] + 0.05 < pose.pose.position.y < self.table_corners_y[1] - 0.05) \
-        #     and (self.table_height_z < pose.pose.position.z < self.table_height_z + 0.1) \
-        #     and ((45 < pitch < 135) or (-315 < pitch < -225)):
-        if ((45 < pitch < 135) or (-315 < pitch < -225)):
-            
+            angle = euler_from_quaternion([pose.pose.orientation.x, pose.pose.orientation.y,
+                                           pose.pose.orientation.z, pose.pose.orientation.w])
+            roll, pitch, yaw = math.degrees(angle[0]), math.degrees(angle[1]), math.degrees(angle[2])
             # print('pitch: ', angle[1], pitch)
 
-            self.pub_coordinates.publish(pose)
-            # print("pose (within limits): ", pose)
+            # if (self.table_corners_x[0] + 0.05 < pose.pose.position.x < self.table_corners_x[1] - 0.05) \
+            #     and (self.table_corners_y[0] + 0.05 < pose.pose.position.y < self.table_corners_y[1] - 0.05) \
+            #     and (self.table_height_z < pose.pose.position.z < self.table_height_z + 0.1) \
+            #     and ((45 < pitch < 135) or (-315 < pitch < -225)):
+            if ((45 < pitch < 135) or (-315 < pitch < -225)):
+                
+                # print('pitch: ', angle[1], pitch)
+                filtered_grasp_poses.append([pose, abs(90 - pitch)])
+        
+        filtered_grasp_poses = sorted(filtered_grasp_poses, key=lambda pose: pose[1])
+        
+        if len(filtered_grasp_poses) > 0:
+            for pose, pitch_diff in filtered_grasp_poses:
 
-            pose.pose.orientation.x = down_orientation[0]
-            pose.pose.orientation.y = down_orientation[1]
-            pose.pose.orientation.z = down_orientation[2]
-            pose.pose.orientation.w = down_orientation[3]
-            
-            pose.pose.position.y += 0.01  # offset
-            pose.pose.position.z += 0.20  # adding gripper length
-            
-            # if self.check_plan(pose):
-            #     pose.pose.position.z += 0.10
-            #     success = self.check_plan(pose)
-            pose.pose.position.z += 0.10
+                self.pub_coordinates.publish(pose)
+                print("Best pose (within limits): ", pose)
 
-            # if success:
-            print('FINAL pose: ', pose)
-            self.open_gripper()
-            # raw_input('Approach ...')
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
+                pose.pose.orientation.x = down_orientation[0]
+                pose.pose.orientation.y = down_orientation[1]
+                pose.pose.orientation.z = down_orientation[2]
+                pose.pose.orientation.w = down_orientation[3]
 
-            # raw_input('Grasp ...')
-            pose.pose.position.z -= 0.10
-            self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
-            self.close_gripper()
+                pose.pose.position.y += 0.01  # offset
+                pose.pose.position.z += 0.20  # adding gripper length
 
-            # raw_input('Lift ...')
-            pose.pose.position.z += 0.10
-            self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
-
-            success = False
-            while not success:
-                pose.pose.position.x = np.random.uniform(self.table_corners_x[0] + 0.15, self.table_corners_x[1] - 0.15)
-                pose.pose.position.y = np.random.uniform(self.table_corners_y[0] + 0.1, self.table_corners_y[1] - 0.1)
-                success = self.check_plan(pose)
-
-            # raw_input('Move to a random location ...')
-            self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
-
-            # raw_input('Place ...')
-            pose.pose.position.z -= 0.10
-            self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
-            self.open_gripper()
-            pose.pose.position.z += 0.20
-            self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
-            # self.arm_group.go(wait=True)
-            self.move_safely(pose)
-
-            # self.initialise_robot()
-
-        return success
+                pose.pose.position.z += 0.10
+                # Check if approach pose is plannable
+                if self.check_plan(pose, num_points=10):
+                    # Check if pose is plannable
+                    pose.pose.position.z -= 0.10
+                    if self.check_plan(pose, num_points=10):
+                        return pose
+        else:
+            return None
     
     def perform_transformation(self, pose):
 
@@ -298,16 +290,17 @@ class GPDPickAndPlace:
 
         return pose
     
-    def check_plan(self, pose):
+    def check_plan(self, pose, num_points=3):
 
         self.arm_group.set_pose_target(pose, end_effector_link="right_gripper_base_link")  # Set target pose
         robot_trajectory = self.arm_group.plan()  # Plan motion and return whether point is viable or not/calculation time
 
-        print("robot_trajectory: ", len(robot_trajectory.joint_trajectory.points))
+        # print("robot_trajectory: ", len(robot_trajectory.joint_trajectory.points))
 
         success = False
-        if 0 < len(robot_trajectory.joint_trajectory.points) <= 3:
+        if 0 < len(robot_trajectory.joint_trajectory.points) <= num_points:
             success = True
+            # print("robot_trajectory: ", robot_trajectory.joint_trajectory)
         else:
             # It is always good to clear your targets after planning with poses
             self.arm_group.clear_pose_targets()
@@ -388,6 +381,46 @@ class GPDPickAndPlace:
         rospy.sleep(1)
         self.gripper_pub.publish(msg)
         rospy.sleep(1)
+    
+    def get_gripper_position(self):
+
+        js = rospy.wait_for_message(self.gripper_topic, JointState)
+
+        return round(js.position[0], 2)
+    
+    def get_force_values(self):
+
+        w_msg = rospy.wait_for_message(self.wrench_topic, WrenchStamped)
+
+        return w_msg.wrench.force
+    
+    def check_grasp_gripper_pose(self):
+        # Check if gripper pose is between open and closed completely
+        
+        gripper_pos = self.get_gripper_position()
+        print('Gripper pos: ', gripper_pos)
+        
+        grasp_success = 0 < gripper_pos < 0.79
+        if not grasp_success:
+            print('Grasp unsuccessful: gripper_pose')
+
+        return grasp_success
+    
+    def check_grasp_gripper_pose_difference(self, prev_gripper_pose):
+        # Close gripper again and check if there is a difference in the prior 
+        # and new gripper pose after closing
+
+        self.close_gripper()
+        gripper_pos = self.get_gripper_position()
+        gripper_pose_diff = abs(prev_gripper_pose - gripper_pos)
+        print('gripper_pose_diff: ', gripper_pose_diff)
+
+        grasp_success = gripper_pose_diff < 0.1
+        if not grasp_success:
+            print('Grasp unsuccessful: pose_difference')
+
+        return grasp_success
+
 
 
 if __name__ == "__main__":
@@ -401,6 +434,6 @@ if __name__ == "__main__":
             X Try to reduce that
             - Make sure all the points in the plan are inside table top; use fk
 
-    - Filter point cloud before passing to gpd
-    - Check if grasp was successful or not
+    X Filter point cloud before passing to gpd
+    X Check if grasp was successful or not
     '''
