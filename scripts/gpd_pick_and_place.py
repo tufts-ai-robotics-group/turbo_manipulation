@@ -5,12 +5,15 @@
 import os
 import time
 import math
+import shutil
 import numpy as np
+from datetime import datetime
 
 import rospy
 from gpd_ros.msg import GraspConfigList
 from visualization_msgs.msg import MarkerArray
 from geometry_msgs.msg import PoseStamped, WrenchStamped, TransformStamped, PoseStamped, Pose, Quaternion
+from joint_recorder.srv import recorderSrv, recorderSrvRequest
 from robotiq_85_msgs.msg import GripperCmd
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2, JointState
@@ -71,6 +74,8 @@ class GPDPickAndPlace:
         self.gripper_topic = '/gripper/joint_states'
         self.wrench_topic = '/right/wrench'
 
+        self.sensor_data_path = '/home/pc1/Downloads/datasets/temp/'
+
         # Table corner poses:
         self.table_corners_x = [0.038783, 0.87016]
         self.table_corners_y = [0.031553, 0.46748]
@@ -93,7 +98,9 @@ class GPDPickAndPlace:
         # )
         self.pub_coordinates = rospy.Publisher("grasp_pose", PoseStamped, queue_size=1000)
         self.filtered_pointcloud_pub = rospy.Publisher("filtered_pointcloud", PointCloud2, queue_size=10)
-        self.proxy = rospy.ServiceProxy('/turbo_object_detector/detect', TabletopPerception)
+        self.object_detector = rospy.ServiceProxy('/turbo_object_detector/detect', TabletopPerception)
+        self.recording_service = rospy.ServiceProxy('/data_recording_service', recorderSrv)
+        self.recording_srv_request = recorderSrvRequest()  # Create a service request object
 
         self.arm_group = moveit_commander.MoveGroupCommander("right_manipulator")  # Creating moveit client to control arm
         self.gripper_pub = rospy.Publisher('/gripper/cmd', GripperCmd, queue_size=1)
@@ -109,6 +116,7 @@ class GPDPickAndPlace:
         # Wait for grasps to arrive.
         # rate = rospy.Rate(1)
 
+        grasp_count = 0
         while not rospy.is_shutdown():
 
             self.grasp_pose_done = False
@@ -120,10 +128,8 @@ class GPDPickAndPlace:
             while self.grasp_pose_done == False:
                 time.sleep(0.1)
                 x = x + 1
-                if x > 1200:  # Adds a 120 second time out for the while loop
-                    print(
-                        "Error: Was not able to properly receive and process information"
-                    )
+                if x > 300:  # Adds a 120 second time out for the while loop
+                    print("Error: Was not able to properly receive and process information")
                     break
 
             if self.grasp_pose_done:
@@ -131,25 +137,32 @@ class GPDPickAndPlace:
                 if pose:
                     print('MOVING to pose: ', pose)
 
+                    sensorDataPath = self.sensor_data_path + 'trial-' + str(grasp_count) + '_' + datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + '/'
+
                     # raw_input('Approach ...')
-                    pose.pose.position.z += 0.10                    
+                    pose.pose.position.z += 0.10
                     self.open_gripper()
                     self.move_safely(pose)
 
                     # raw_input('Grasp ...')
+                    self.start_recording(sensorDataPath + 'grasp' + '/')
                     pose.pose.position.z -= 0.10
                     self.move_safely(pose)
                     self.close_gripper()
+                    self.stop_recording()
                     gripper_pose = self.get_gripper_position()
                     print('gripper_pose: ', gripper_pose)
 
                     # raw_input('Lift ...')
+                    self.start_recording(sensorDataPath + 'lift' + '/')
                     pose.pose.position.z += 0.10
                     self.move_safely(pose)
-
+                    self.stop_recording()
+                    
                     # Make sure grasp was successful
                     if not (self.check_grasp_gripper_pose() and self.check_grasp_gripper_pose_difference(gripper_pose)):
                         print('Retrying from top ...')
+                        shutil.rmtree(sensorDataPath)
                         continue
 
                     # raw_input('Move to a random location ...')
@@ -161,11 +174,15 @@ class GPDPickAndPlace:
                     self.move_safely(pose)
 
                     # raw_input('Place ...')
+                    self.start_recording(sensorDataPath + 'place' + '/')
                     pose.pose.position.z -= 0.10
                     self.move_safely(pose)
                     self.open_gripper()
+                    self.stop_recording()
                     pose.pose.position.z += 0.20
                     self.move_safely(pose)
+
+                    grasp_count += 1
 
                 # time.sleep(10)
     
@@ -186,10 +203,11 @@ class GPDPickAndPlace:
         # except rospy.ServiceException as e:
         #     print("Service call failed: %s" % e)
 
-        resp1 = self.proxy()
-        print("Objects Found : ", len(resp1.cloud_clusters))
-        
-        self.filtered_pointcloud_pub.publish(resp1.cloud_clusters[0])
+        resp = self.object_detector()
+        print("Objects Found : ", len(resp.cloud_clusters))
+
+        if len(resp.cloud_clusters) > 0:
+            self.filtered_pointcloud_pub.publish(np.random.choice(resp.cloud_clusters))
 
     def callback_coordinates(self, msg):
         # Stores grasp coordinate information from GPD
@@ -270,7 +288,6 @@ class GPDPickAndPlace:
                 pose.pose.orientation.z = down_orientation[2]
                 pose.pose.orientation.w = down_orientation[3]
 
-                pose.pose.position.y += 0.01  # offset
                 pose.pose.position.z += 0.20  # adding gripper length
 
                 pose.pose.position.z += 0.10
@@ -420,7 +437,66 @@ class GPDPickAndPlace:
             print('Grasp unsuccessful: pose_difference')
 
         return grasp_success
+    
+    def start_recording(self, folder_name):
+        command1 = "mkdir -p " + folder_name + "camera_rgb_image/"
+        command2 = "mkdir -p " + folder_name + "camera_depth_image/"
+        # command3 = "mkdir -p " + folder_name + "touch_image/"
+        command4 = "mkdir -p " + folder_name + "joint_states/"
+        command5 = "mkdir -p " + folder_name + "gripper_joint_states/"
+        command6 = "mkdir -p " + folder_name + "wrench/"
+        command7 = "mkdir -p " + folder_name + "audio/"
+        os.system(command1)
+        os.system(command2)
+        # os.system(command3)
+        os.system(command4)
+        os.system(command5)
+        os.system(command6)
+        os.system(command7)
 
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "joint_states/joint_states.csv"
+        self.recording_srv_request.topic.data = "/right/joint_states"
+        self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "gripper_joint_states/gripper_joint_states.csv"
+        self.recording_srv_request.topic.data = "/gripper/joint_states"
+        self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "wrench/wrench.csv"
+        self.recording_srv_request.topic.data = "/right/wrench"
+        self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "audio/audio.wav"
+        self.recording_srv_request.topic.data = "audio_capture"
+        self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "camera_rgb_image/"
+        self.recording_srv_request.topic.data = "color_frame_capture"
+        self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "set_file_name"
+        self.recording_srv_request.fileName.data = folder_name + "camera_depth_image/"
+        self.recording_srv_request.topic.data = "depth_frame_capture"
+        self.recording_service.call(self.recording_srv_request)
+
+        # self.recording_srv_request.command.data = "set_file_name"
+        # self.recording_srv_request.fileName.data = folder_name + "touch_image/"
+        # self.recording_srv_request.topic.data = "touch_frame_capture"
+        # self.recording_service.call(self.recording_srv_request)
+
+        self.recording_srv_request.command.data = "start"
+        self.recording_service.call(self.recording_srv_request)
+
+    
+    def stop_recording(self):
+
+        self.recording_srv_request.command.data = "stop"
+        self.recording_service.call(self.recording_srv_request)
 
 
 if __name__ == "__main__":

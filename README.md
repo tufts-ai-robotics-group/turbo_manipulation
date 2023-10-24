@@ -19,6 +19,12 @@ git clone https://github.com/tufts-ai-robotics-group/turbo_manipulation.git
 - Make sure the camera is plugged into the computer vis USB <br>
 - Launch camera driver: `roslaunch realsense2_camera rs_camera.launch filters:=pointcloud`
 
+## Start microphone
+- Make sure the ReSpeaker Microphone Array is plugged into the computer vis USB <br>
+- Check audio device name: `arecord -l` <br>
+- Install microphone driver: https://github.com/furushchev/respeaker_ros <br>
+`roslaunch respeaker_ros respeaker.launch`
+
 ## Manipulation (right arm)
 
 - `sudo chmod 777 /dev/ttyUSB0`
@@ -27,6 +33,9 @@ git clone https://github.com/tufts-ai-robotics-group/turbo_manipulation.git
 
 ### MoveIt example
 - `rosrun turbo_manipulation real_moveit_example.py`
+
+### Record Data
+- `roslaunch joint_recorder recordingService.launch numTopics:=3 topicName1:=/right/joint_states topicName2:=/gripper/joint_states topicName3:=/right/wrench`
 
 ### pick and place using GPD
 ```
